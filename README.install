@@ -1,0 +1,171 @@
+*****************************************************************
+** Aanmaken van een custom bootable CD/USB op basis van Ubuntu **
+*****************************************************************
+
+De procedure hieronder is grotendeels overgenomen van https://help.ubuntu.com/community/LiveCDCustomizationFromScratch
+
+Installeer eerst een systeem met de gewenste versie van ubuntu: lubuntu 15.04
+Op dit systeem gaan we een bootable image bouwen tbv het kiosksysteem dat automatisch een browser zal starten met daarin de gewenste site.
+
+Log in op het zojuist geinstalleerde systeem en volg onderstaande stappen:
+
+sudo apt-get install debootstrap
+mkdir -p work/chroot
+
+cd work
+sudo debootstrap --arch=amd64 vivid chroot
+# basissysteem is nu geinstalleerd
+
+sudo mount --bind /dev chroot/dev
+sudo cp /etc/apt/sources.list chroot/etc/apt/sources.list
+
+sudo chroot chroot
+mount none -t proc /proc
+mount none -t sysfs /sys
+mount none -t devpts /dev/pts
+export HOME=/root
+export LC_ALL=C
+apt-get update
+apt-get install --yes dbus
+dbus-uuidgen > /var/lib/dbus/machine-id
+mv /bin/systemctl /bin/systemctl.org
+cp /bin/true /bin/systemctl
+apt-get --yes upgrade
+apt-get install --yes ubuntu-standard casper lupin-casper
+apt-get install --yes discover laptop-detect os-prober
+
+apt-get install --yes linux-generic
+-> kies om grub niet te installeren
+
+touch /etc/init.d/modemmanager
+apt-get install lubuntu-desktop
+apt-get install gir1.2-webkit2-4.0
+adduser kiosk
+in /etc/xdg/lubuntu/lxdm/lxdm.conf: autologin=kiosk
+
+maak /etc/lightdm/lightdm.conf met:
+[SeatDefaults]
+allow-guest=false
+autologin-guest=false
+autologin-user=kiosk
+autologin-user-timeout=0
+autologin-session=lightdm-autologin
+
+kopieer de volgende bestanden uit de git-repo naar home/kiosk:
+home/kiosk/.bash_logout
+home/kiosk/.bashrc
+home/kiosk/.config/autostart/kiosk.desktop
+home/kiosk/.config/autostart/light-locker.desktop
+home/kiosk/.config/autostart/screensaver-settings.desktop
+home/kiosk/.config/lxpanel/Lubuntu/config
+home/kiosk/.config/lxpanel/Lubuntu/panels/panel
+home/kiosk/.config/openbox/lubuntu-rc.xml
+home/kiosk/.config/pcmanfm/lubuntu/desktop-items-0.conf
+home/kiosk/.profile
+home/kiosk/kiosk.py
+home/kiosk/start-kiosk.sh
+
+
+Cleanup the ChRoot Environment
+mv /bin/systemctl.org /bin/systemctl
+apt-get clean
+rm -rf /tmp/*
+umount -lf /proc
+umount -lf /sys
+umount -lf /dev/pts
+exit
+
+reboot om files in de chroot vrij te maken
+
+cd work
+sudo apt-get install syslinux squashfs-tools genisoimage
+mkdir -p image/{casper,isolinux,install}
+sudo cp chroot/boot/vmlinuz-3.19.0-21-generic image/casper/vmlinuz
+sudo cp chroot/boot/initrd.img-3.19.0-21-generic image/casper/initrd.gz
+
+sudo apt-get install isolinux
+cp /usr/lib/ISOLINUX/isolinux.bin image/isolinux/
+cp /usr/lib/syslinux/modules/bios/ldlinux.c32 image/isolinux/
+cp /boot/memtest86+.bin image/install/memtest
+
+printf "\x18splash.rle\x0a" > image/isolinux/isolinux.txt
+copy splash.rle to image/isolinux/splash.rle
+ 
+maak isolinux.cfg in image/isolinux:
+
+DEFAULT live
+LABEL live
+  menu label ^Start or install Ubuntu Remix
+  kernel /casper/vmlinuz
+  append  file=/cdrom/preseed/ubuntu.seed boot=casper initrd=/casper/initrd.gz quiet splash --
+LABEL check
+  menu label ^Check CD for defects
+  kernel /casper/vmlinuz
+  append  boot=casper integrity-check initrd=/casper/initrd.gz quiet splash --
+LABEL memtest
+  menu label ^Memory test
+  kernel /install/memtest
+  append -
+LABEL hd
+  menu label ^Boot from first hard disk
+  localboot 0x80
+  append -
+DISPLAY isolinux.txt
+TIMEOUT 300
+PROMPT 0 
+
+#prompt flag_val
+# 
+# If flag_val is 0, display the "boot:" prompt 
+# only if the Shift or Alt key is pressed,
+# or Caps Lock or Scroll lock is set (this is the default).
+# If  flag_val is 1, always display the "boot:" prompt.
+#  http://linux.die.net/man/1/syslinux   syslinux manpage
+
+
+-------- einde isolinux.cfg -----------------
+
+sudo chroot chroot dpkg-query -W --showformat='${Package} ${Version}\n' | sudo tee image/casper/filesystem.manifest
+sudo cp -v image/casper/filesystem.manifest image/casper/filesystem.manifest-desktop
+REMOVE='ubiquity ubiquity-frontend-gtk ubiquity-frontend-kde casper lupin-casper live-initramfs user-setup discover1 xresprobe os-prober libdebian-installer4'
+for i in $REMOVE 
+do
+        sudo sed -i "/${i}/d" image/casper/filesystem.manifest-desktop
+done
+
+Compress the chroot
+sudo mksquashfs chroot image/casper/filesystem.squashfs -e boot
+printf $(sudo du -sx --block-size=1 chroot | cut -f1) > image/casper/filesystem.size
+
+maak file image/README.diskdefines:
+
+#define DISKNAME  De Maas Kiosk
+#define TYPE  binary
+#define TYPEbinary  1
+#define ARCH  amd64
+#define ARCHi386  0
+#define DISKNUM  1
+#define DISKNUM1  1
+#define TOTALNUM  0
+#define TOTALNUM0  1
+
+------------- eind README.diskdefines -------------
+
+touch image/ubuntu
+mkdir image/.disk
+cd image/.disk
+touch base_installable
+echo "full_cd/single" > cd_type
+echo "Ubuntu Remix 15.04" > info
+echo "http://www.i-mike.nl" > release_notes_url
+cd ../..
+
+sudo -s
+(cd image && find . -type f -print0 | xargs -0 md5sum | grep -v "\./md5sum.txt" > md5sum.txt)
+exit
+
+cd image
+sudo mkisofs -r -V "De Maas Kiosk" -cache-inodes -J -l -b isolinux/isolinux.bin -c isolinux/boot.cat -no-emul-boot -boot-load-size 4 -boot-info-table -o ../ubuntu-remix.iso .
+cd ..
+
+cd ../..
